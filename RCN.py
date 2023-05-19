@@ -1,7 +1,23 @@
 # This is a sample Python script.
 from jax import config
 
-config.update("jax_enable_x64", True)
+from utils import train_test_split, compute_forecast_horizon
+
+import jax
+
+
+import matplotlib.pyplot as plt
+import numpy as np
+from copy import copy
+import jax.numpy as jnp
+from jax import random, grad, jit
+from functools import partial
+
+from dysts.datasets import load_dataset
+from utils import train_test_split, compute_forecast_horizon
+
+from dysts.flows import Lorenz, Rossler
+from readouts import *
 
 # Press Shift+F10 to execute it or replace it with your code.
 # Press Double Shift to search everywhere for classes, files, tool windows, actions, and settings.
@@ -11,7 +27,10 @@ import jax.numpy as jnp
 from jax import random, grad, jit
 from functools import partial
 
+from utils import compute_MSE
+
 import matplotlib.pyplot as plt
+from readouts import *
 
 
 def _rdot(x: jnp.ndarray, r: jnp.ndarray, gamma: float, W_in: jnp.ndarray,
@@ -85,6 +104,7 @@ class RCN:
 
     def __init__(self,
                  key,
+                 readout,
                  n_dim: int = 500,
                  n_input: int = 1,
                  spectral_radius: float = 0.9,
@@ -93,7 +113,6 @@ class RCN:
                  bias: float = 0.1,
                  dt: float = 1e-3,
                  washout_steps: int = None,
-                 reg_param: float = 1e-4
                  ):
 
 
@@ -124,7 +143,9 @@ class RCN:
             The regularization parameter for the output weight matrix, by default 1e-4.
         """
 
+
         self.key, W_key, W_in_key, bias_key = random.split(key, 4)
+        self.readout = readout
         self.n_dim = n_dim
         self.n_input = n_input
         self.spectral_radius = spectral_radius
@@ -133,16 +154,15 @@ class RCN:
         self.bias = bias * jnp.array(random.normal(bias_key, [n_dim]))
         self.dt = dt
         self.washout_steps = washout_steps
-        self.reg_param = reg_param
 
         self.W = self._create_reservoir(W_key, self.spectral_radius)
         self.W_in = self._create_W_in(W_in_key)
 
-        self.W_out = None
         self.r_last = None
         self.R = None
         self.R_dot = None
         self.input = None
+        self.input_dot = None
 
 
         self.rdot = jit(partial(_rdot, gamma=self.gamma, W_in=self.W_in,
@@ -186,7 +206,9 @@ class RCN:
 
         return self.R
 
-    def train(self, input, states=None):
+
+
+    def train(self, input, input_dot = None, states=None, states_dot = None):
 
         """
         Trains the output weights of the RCN.
@@ -204,39 +226,16 @@ class RCN:
             The trained output weight matrix.
         """
         self.input = input
+
+        if self.washout_steps is None:
+            self.washout_steps = int(len(input)/10)
+
         if states is None:
             states = self.listen(input)
-        W_out = self.fit_W_out(input, states)
+            states_dot = self.R_dot
 
-        self.W_out = W_out
+        self.readout.fit(input, input_dot, states, states_dot, self.washout_steps)
 
-        return W_out
-
-    def fit_W_out(self, input, states):
-        """
-           Computes the output weight matrix for the given input and reservoir states.
-
-           Parameters
-           ----------
-           input : jnp.ndarray
-               The input sequence.
-           states : jnp.ndarray
-               The reservoir states in response to the input sequence.
-
-           Returns
-           -------
-           jnp.ndarray
-               The output weight matrix.
-           """
-        if self.washout_steps is None:
-            self.washout_steps = int(input.shape[0] / 10)
-        
-        s = states[self.washout_steps:]
-        i = input[self.washout_steps:]
-
-        W_out = (jnp.linalg.pinv(s.T @ s + self.reg_param * jnp.eye(self.n_dim))) @ s.T @ input[self.washout_steps:]
-
-        return W_out
 
     def generate(self, n_steps):
         """
@@ -258,7 +257,7 @@ class RCN:
         r = copy(self.r_last)
 
         for _ in range(n_steps):
-            x = r @ self.W_out  # change with a predict function
+            x = self.readout.predict(r)  # change with a predict function
             R_test.append(r)
             X_test.append(x)
             r, r_dot = self.step(x, r)
@@ -308,7 +307,7 @@ class RCN:
         return W_in
 
 
-    def predict(self, states=None, discard=None):
+    def predict_states(self, states=None, discard=None):
 
         """
         Predict the output values using the trained ESN.
@@ -331,9 +330,31 @@ class RCN:
         if discard is None:
             discard = self.washout_steps
 
-        return states[discard:] @ self.W_out
+        return self.readout.predict(states[discard:])
 
-    def train_MSE(self, normalize=False):
+    def predict_derivative(self, derivatives = None, states = None, discard=None, use_estimate=True):
+        if states is None:
+            states = self.R
+
+        if use_estimate:
+            print("using estimate...")
+            vals = self.readout.predict(states)
+            derivatives = self.rdot(vals, states)
+
+        if derivatives is None:
+            derivatives = self.R_dot
+
+
+        if discard is None:
+            discard = self.washout_steps
+
+        return self.readout.deriv_predict(derivatives[discard:], states[discard:])
+
+    def derivative_train_MSE(self, input_derivative, normalize=True, use_estimate=True, use_mae=False):
+        return compute_MSE(input_derivative, self.predict_derivative(discard=0, use_estimate=use_estimate), self.washout_steps, normalize, use_mae=use_mae)
+
+
+    def train_MSE(self, normalize=True, use_mae=False):
         """
            Compute the Mean Squared Error (MSE) loss between the input and the predicted output.
 
@@ -347,72 +368,105 @@ class RCN:
            float
                The MSE loss value.
            """
-        return self._MSE(self.input, self.predict(discard=0), self.washout_steps, normalize)
+        return compute_MSE(self.input, self.predict_states(discard=0), self.washout_steps, normalize, use_mae=use_mae)
 
-    def _MSE(self, target, prediction, washout_steps: int, normalize: bool = False):
 
-        """
-        Compute mean-square error (MSE) between the `target` and the `prediction`.
 
-        Parameters
-        ----------
-        target : jnp.ndarray
-            The target output.
-        prediction : jnp.ndarray
-            The predicted output.
-        washout_steps : int
-            The number of initial steps to discard.
-        normalize : bool, optional
-            Whether to normalize the input and predicted output, by default False.
 
-        Returns
-        -------
-        jax.interpreters.xla.DeviceArray
-            The MSE loss value.
-        """
-
-        y = target[washout_steps:]
-        y_hat = prediction[washout_steps:]
-
-        if normalize:
-            means = jnp.mean(y, axis=0)
-            stds = jnp.std(y, axis=0)
-
-            y = (y - means) / stds
-            y_hat = (y_hat - means) / stds
-
-        MSE = jnp.mean((y - y_hat) ** 2)
-        return MSE
 
 
 
 
 # Press the green button in the gutter to run the script.
 if __name__ == '__main__':
-    key = random.PRNGKey(42)
-    rcn = RCN(key)
-    import numpy as np
 
-    # define input signal as a sine wave
-    freq = 0.1  # frequency of the sine wave
-    t = np.arange(0, 100, 0.1)  # time vector
-    input = np.sin(2 * np.pi * freq * t).reshape(-1, 1)
+    dt = 1e-3
+    train_per = 0.7
+    lam_lorenz = 0.906
 
-    # repeat input to match original length
-    input = np.tile(input, (10, 1))[:1000, :]
+    ## Load and simulate an attractor
 
-    # convert to jax array
-    input = jnp.array(input)
+    model = Lorenz()
+    model.dt = dt
 
-    print(input.shape)
-    print(rcn.train(input).shape)
-    P = rcn.predict()
-    # print(rcn.generate(T = 2))
-    print(rcn.train_MSE())
-    plt.plot(input)
-    plt.plot(P)
+    t, x_tot = model.make_trajectory(80000, return_times=True)
+    x_dot_tot = jnp.array(model.rhs(x_tot, t)).T
+
+    x_train, x_test = train_test_split(x_tot, 1000, train_percentage=train_per)
+    x_dot_train, x_dot_test = train_test_split(x_dot_tot, 1000, train_percentage=train_per)
+
+    key = random.PRNGKey(14)
+    #readout = LinearReadout(500, 1e-6)
+    #readout = QuadraticReadout(500, reg_param=1e-6)
+    readout = LinearReadoutWithDerivatives(alpha=0)
+    rcn = RCN(key=key, n_dim=500, readout=readout, n_input=3, dt=dt, washout_steps=1000, spectral_radius=0.8, sigma = 0.02, gamma = 10)
+    rcn.train(x_train, x_dot_train)
+    y_train = rcn.predict_states()
+
+    print(f"MSE is {rcn.train_MSE()}")
+
+    d_mce = rcn.derivative_train_MSE(x_dot_train, use_estimate=False)
+    print(f"MSE on derivative is {d_mce}")
+
+    d_mce = rcn.derivative_train_MSE(x_dot_train, use_estimate=True)
+    print(f"MSE on estimated derivative is {d_mce}")
+
+    N = len(y_train)
+    T = np.arange(N) * dt * lam_lorenz
+    fig, axs = plt.subplots(3, 1, figsize=(8, 12))
+
+    axs[0].plot(T, y_train[:, 0], 'r')
+    axs[0].plot(T, x_train[1000:, 0], 'k--')
+
+    axs[0].set_title('Component x')
+
+    axs[1].plot(T, y_train[:, 1], 'r')
+    axs[1].plot(T, x_train[1000:, 1], 'k--')
+
+    axs[1].set_title('Component y')
+
+    axs[2].plot(T, y_train[:, 2], 'r')
+    axs[2].plot(T, x_train[1000:, 2], 'k--')
+    axs[2].set_title('Component z')
+
+    plt.tight_layout()
     plt.show()
-    plt.plot(rcn.generate(1))
+
+
+
+    print("generating test")
+    y_test = rcn.generate(len(x_test))
+
+    fh, f_steps = compute_forecast_horizon(x_test, y_test, dt=dt, lyap_exp=lam_lorenz, epsilon=1, normalize=True)
+    print(f"forecast horizon is {fh}")
+    print("figures...")
+    plt.plot(y_test[:,0], y_test[:,1])
+    plt.plot(x_test[:,0], x_test[:,1], 'k--')
+    plt.show()
+
+
+    fig, axs = plt.subplots(3, 1, figsize=(8, 12))
+    N = len(y_test)
+    T = np.arange(N) * dt * lam_lorenz
+
+    axs[0].plot(T, y_test[:, 0], 'r')
+    axs[0].plot(T, x_test[:, 0], 'k--')
+    axs[0].vlines(fh, ymin=x_test[:, 0].min(), ymax=x_test[:, 0].max())
+    axs[0].set_title('Component x')
+
+    axs[1].plot(T, y_test[:, 1], 'r')
+    axs[1].plot(T, x_test[:, 1], 'k--')
+    axs[1].vlines(fh, ymin=x_test[:, 1].min(), ymax=x_test[:, 1].max())
+    axs[1].set_title('Component y')
+
+    axs[2].plot(T, y_test[:, 2], 'r')
+    axs[2].plot(T, x_test[:, 2], 'k--')
+    axs[2].vlines(fh, ymin=x_test[:, 2].min(), ymax=x_test[:, 2].max())
+    axs[2].set_title('Component z')
+
+    plt.tight_layout()
     plt.show()
 
 # See PyCharm help at https://www.jetbrains.com/help/pycharm/
+
+

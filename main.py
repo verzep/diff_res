@@ -28,7 +28,7 @@ rcn = RCN(key=key, n_input=3, dt=dt)
 rcn.train(x)
 y = rcn.predict()
 
-# plt.plot(y[:,0], 'r')
+# plt.plot(y_train[:,0], 'r')
 # plt.plot(x[:,0], 'k--')
 # plt.show()
 
