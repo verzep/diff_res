@@ -68,6 +68,8 @@ if __name__ == '__main__':
         d_mse_x = jnp.sqrt(rcn.derivative_train_MSE(x_dot_train,normalize=False, use_estimate=True))*dt
         print(f"MSE on estimated derivative is {d_mse_x}")
 
+
+
         print("generating test")
         y_test = rcn.generate(len(x_test))
 

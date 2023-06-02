@@ -14,7 +14,7 @@ from jax import random, grad, jit
 from functools import partial
 
 from dysts.datasets import load_dataset
-from utils import train_test_split, compute_forecast_horizon
+from utils import train_test_split, compute_forecast_horizon, calculate_lyapunov_exponent
 
 from dysts.flows import Lorenz, Rossler
 from readouts import *
@@ -332,6 +332,20 @@ class RCN:
 
         return self.readout.predict(states[discard:])
 
+    def predict_state_derivative(self, states = None, discard=None):
+        if states is None:
+            states = self.R
+
+
+        input = self.readout.predict(states)
+
+        if discard is None:
+            discard = self.washout_steps
+
+        return  self.rdot(input[discard:], states[discard:])
+
+
+
     def predict_derivative(self, derivatives = None, states = None, discard=None, use_estimate=True):
         if states is None:
             states = self.R
@@ -399,17 +413,34 @@ if __name__ == '__main__':
     #readout = LinearReadout(500, 1e-6)
     #readout = QuadraticReadout(500, reg_param=1e-6)
     readout = LinearReadoutWithDerivatives(alpha=0)
-    rcn = RCN(key=key, n_dim=500, readout=readout, n_input=3, dt=dt, washout_steps=1000, spectral_radius=0.8, sigma = 0.02, gamma = 10)
+    rcn = RCN(key=key, n_dim=500, readout=readout, n_input=3, dt=dt, washout_steps=1000, spectral_radius=0.8, sigma=0.02, gamma = 10)
     rcn.train(x_train, x_dot_train)
     y_train = rcn.predict_states()
 
-    print(f"MSE is {rcn.train_MSE()}")
+    R_hat_dot = rcn.predict_state_derivative()
+    R_dot = rcn.R_dot[1000:]
 
-    d_mce = rcn.derivative_train_MSE(x_dot_train, use_estimate=False)
-    print(f"MSE on derivative is {d_mce}")
+    mse = jnp.sqrt(rcn.train_MSE(normalize=False))
+    print(f"MSE is {mse}")
 
-    d_mce = rcn.derivative_train_MSE(x_dot_train, use_estimate=True)
-    print(f"MSE on estimated derivative is {d_mce}")
+
+    d_mse = jnp.sqrt(rcn.derivative_train_MSE(x_dot_train, normalize=False, use_estimate=False)) * dt
+    print(f"MSE on derivative is {d_mse}")
+
+    d_mse_x = jnp.sqrt(rcn.derivative_train_MSE(x_dot_train, normalize=False, use_estimate=True)) * dt
+    print(f"MSE on estimated derivative is {d_mse_x}")
+
+
+    r_mse = jnp.sqrt(compute_MSE(R_dot ,R_hat_dot, washout_steps=0 ,normalize=False))
+    print(f"MSE on R_dot is {r_mse}")
+
+    l_e = calculate_lyapunov_exponent(x_train[1000:], y_train, dt)
+    print(f"M.L.E. is {l_e}")
+
+
+
+
+
 
     N = len(y_train)
     T = np.arange(N) * dt * lam_lorenz
@@ -466,6 +497,10 @@ if __name__ == '__main__':
 
     plt.tight_layout()
     plt.show()
+
+
+    l_e = calculate_lyapunov_exponent(x_test, y_test, dt)
+    print(f"M.L.E. in test is {l_e}")
 
 # See PyCharm help at https://www.jetbrains.com/help/pycharm/
 

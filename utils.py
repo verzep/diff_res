@@ -70,3 +70,28 @@ def compute_MSE(target, prediction, washout_steps: int, normalize: bool = False,
         else:
             MSE = jnp.mean((y - y_hat) ** 2)
         return MSE
+
+import numpy as np
+from scipy.stats import linregress
+def calculate_lyapunov_exponent(traj1, traj2, dt=1.0):
+    """
+    Calculate the lyapunov exponent of two multidimensional trajectories using
+    simple linear regression based on the log-transformed separation of the
+    trajectories.
+
+    Args:
+        traj1 (np.ndarray): trajectory 1 with shape (n_timesteps, n_dimensions)
+        traj2 (np.ndarray): trajectory 2 with shape (n_timesteps, n_dimensions)
+        dt (float): time step between timesteps
+
+    Returns:
+        float: lyapunov exponent
+    """
+    separation = np.linalg.norm(traj1 - traj2, axis=1)
+    log_separation = np.log(separation)
+    time_vals = np.arange(log_separation.shape[0])
+    slope, intercept, r_value, p_value, std_err = linregress(time_vals, log_separation)
+    lyap = slope / dt
+    return lyap
+
+
