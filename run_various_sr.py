@@ -1,3 +1,8 @@
+from utils import train_test_split, compute_forecast_horizon
+
+import jax
+
+from RCN import RCN
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -7,104 +12,163 @@ from jax import random, grad, jit
 from functools import partial
 
 from dysts.datasets import load_dataset
-from utils import train_test_split, compute_forecast_horizon
+from utils import train_test_split, compute_forecast_horizon, calculate_lyapunov_exponent
 
-from dysts.flows import Lorenz
+from dysts.flows import Lorenz, Rossler
 from readouts import *
 
+# Press Shift+F10 to execute it or replace it with your code.
+# Press Double Shift to search everywhere for classes, files, tool windows, actions, and settings.
 import jax
 from copy import copy
 import jax.numpy as jnp
-from RCN import *
-from copy import deepcopy
+from jax import random, grad, jit
+from functools import partial
 
+from utils import compute_MSE
 
-# Press the green button in the gutter to run the script.
-if __name__ == '__main__':
+import matplotlib.pyplot as plt
+from readouts import *
 
-    print("Simulation in starting")
+dt = 1e-3
+train_per = 0.5
+lam_lorenz = 0.906
 
-    dt = 1e-3
-    train_per = 0.7
-    lam_lorenz = 0.906
+plot = True
 
-    ## Load and simulate an attractor
+## Load and simulate an attractor
 
-    model = Lorenz()
-    model.dt = dt
+model = Lorenz()
+model.dt = dt
 
-    t, x_tot = model.make_trajectory(80000, return_times=True)
-    x_dot_tot = jnp.array(model.rhs(x_tot, t)).T
+t, x_tot = model.make_trajectory(100000, return_times=True)
+x_dot_tot = jnp.array(model.rhs(x_tot, t)).T
 
-    x_train, x_test = train_test_split(x_tot, 1000, train_percentage=train_per)
-    x_dot_train, x_dot_test = train_test_split(x_dot_tot, 1000, train_percentage=train_per)
+x_train, x_test = train_test_split(x_tot, 1000, train_percentage=train_per)
+x_dot_train, x_dot_test = train_test_split(x_dot_tot, 1000, train_percentage=train_per)
 
-    key = random.PRNGKey(42)
-    #readout = LinearReadout(500, 1e-6)
-    readout = QuadraticReadout(500, reg_param=1e-6)
-    #readout = LinearReadoutWithDerivatives(alpha=0)
-    rcn = RCN(key=key, n_dim=500, readout=readout, n_input=3, dt=dt, washout_steps=3000, spectral_radius=1.2)
+exp_key = random.PRNGKey(42)
+
+sr_list = np.linspace(0.8, 1.4, num=10)
+
+metric_list = []
+
+for sr in sr_list:
+
+    exp_key, key = random.split(exp_key, 2)
+    print(f"Spectral Radius is {sr}")
+    readout = LinearReadout(500, 1e-6)
+    #readout = QuadraticReadout(500, reg_param=1e-6)
+    # readout = LinearReadoutWithDerivatives(alpha=0)
+    rcn = RCN(key=key, n_dim=500, readout=readout, n_input=3, dt=dt, washout_steps=1000,
+              spectral_radius=sr, sigma=0.02, gamma=10)
     rcn.train(x_train, x_dot_train)
+    y_train = rcn.predict_states()
 
-    sr_list = np.arange(0.5, 1.6, 0.1)
-    MSE = []
-    MSE_d = []
-    MSE_dx = []
-    FH = []
+    R_hat_dot = rcn.predict_state_derivative()
+    R_dot = rcn.R_dot[1000:]
 
-    for sr in sr_list:
-        print(f"spectral radius is {sr}")
-        readout = LinearReadout()
-        rcn = RCN(key=key, n_dim=500, readout=readout, n_input=3, dt=dt, washout_steps=3000, spectral_radius=sr)
-        rcn.train(x_train, x_dot_train)
-        y = rcn.predict_states()
+    mse = jnp.sqrt(rcn.train_MSE(normalize=False))
+    print(f"MSE is {mse}")
 
-        mse = jnp.sqrt(rcn.train_MSE(normalize=False))
-        print(f"MSE is {mse}")
+    d_mse = jnp.sqrt(rcn.derivative_train_MSE(x_dot_train, normalize=False, use_estimate=False)) * dt
+    print(f"MSE on derivative is {d_mse}")
 
-        d_mse = jnp.sqrt(rcn.derivative_train_MSE(x_dot_train, normalize=False, use_estimate=False))*dt
-        print(f"MSE on derivative is {d_mse}")
+    d_mse_x = jnp.sqrt(rcn.derivative_train_MSE(x_dot_train, normalize=False, use_estimate=True)) * dt
+    print(f"MSE on estimated derivative is {d_mse_x}")
 
-        d_mse_x = jnp.sqrt(rcn.derivative_train_MSE(x_dot_train,normalize=False, use_estimate=True))*dt
-        print(f"MSE on estimated derivative is {d_mse_x}")
+    r_mse = jnp.sqrt(compute_MSE(R_dot, R_hat_dot, washout_steps=0, normalize=False))
+    print(f"MSE on R_dot is {r_mse}")
 
+    l_e = calculate_lyapunov_exponent(x_train[1000:], y_train, dt)
+    print(f"M.L.E. is {l_e}")
 
+    N = len(y_train)
+    T = np.arange(N) * dt * lam_lorenz
 
-        print("generating test")
-        y_test = rcn.generate(len(x_test))
+    print("generating test")
+    y_test = rcn.generate(len(x_test))
 
-        fh, f_steps = compute_forecast_horizon(x_test, y_test, dt=dt, lyap_exp=lam_lorenz, epsilon=1, normalize=True)
-        print(f"forecast horizon is {fh}")
+    f_h, f_steps = compute_forecast_horizon(x_test, y_test, dt=dt, lyap_exp=lam_lorenz, epsilon=1, normalize=True)
+    f_h = f_h[0]
+    print(f"forecast horizon is {f_h}")
 
-        MSE.append(mse)
-        MSE_d.append(d_mse)
-        MSE_dx.append(d_mse_x)
-        FH.append(fh)
+    l_e_test = calculate_lyapunov_exponent(x_test, y_test, dt)
+    print(f"M.L.E. in test is {l_e_test}")
 
+    metric_dict = {
+        "mse": mse,
+        "d_mse": d_mse,
+        "d_mse_x": d_mse_x,
+        "r_mse": r_mse,
+        "l_e": l_e,
+        "f_h": f_h,
+        "l_e_test": l_e_test
+    }
 
+    # if plot:
+    #     print("figures...")
+    #     fig, axs = plt.subplots(3, 1, figsize=(8, 12))
+    #
+    #     axs[0].plot(T, y_train[:, 0], 'r')
+    #     axs[0].plot(T, x_train[1000:, 0], 'k--')
+    #
+    #     axs[0].set_title('Component x')
+    #
+    #     axs[1].plot(T, y_train[:, 1], 'r')
+    #     axs[1].plot(T, x_train[1000:, 1], 'k--')
+    #
+    #     axs[1].set_title('Component y')
+    #
+    #     axs[2].plot(T, y_train[:, 2], 'r')
+    #     axs[2].plot(T, x_train[1000:, 2], 'k--')
+    #     axs[2].set_title('Component z')
+    #
+    #     plt.tight_layout()
+    #     plt.show()
 
-    fig = plt.figure(figsize=(10, 10))
-    ax = fig.add_subplot(1, 1, 1)
+    if plot:
+        plt.title(f'mse={mse:.5f}, FH={f_h:.2f}, d-mse={d_mse:.5f}, r-mse={r_mse:.5f}')
+        plt.plot(y_test[:, 0], y_test[:, 1])
+        plt.plot(x_test[:, 0], x_test[:, 1], 'k--')
+        plt.show()
+        #
+        # fig, axs = plt.subplots(3, 1, figsize=(8, 12))
+        # N = len(y_test)
+        # T = np.arange(N) * dt * lam_lorenz
+        #
+        # axs[0].plot(T, y_test[:, 0], 'r')
+        # axs[0].plot(T, x_test[:, 0], 'k--')
+        # axs[0].vlines(f_h, ymin=x_test[:, 0].min(), ymax=x_test[:, 0].max())
+        # axs[0].set_title('Component x')
+        #
+        # axs[1].plot(T, y_test[:, 1], 'r')
+        # axs[1].plot(T, x_test[:, 1], 'k--')
+        # axs[1].vlines(f_h, ymin=x_test[:, 1].min(), ymax=x_test[:, 1].max())
+        # axs[1].set_title('Component y')
+        #
+        # axs[2].plot(T, y_test[:, 2], 'r')
+        # axs[2].plot(T, x_test[:, 2], 'k--')
+        # axs[2].vlines(f_h, ymin=x_test[:, 2].min(), ymax=x_test[:, 2].max())
+        # axs[2].set_title('Component z')
+        #
+        # plt.tight_layout()
+        # plt.show()
 
-    # Plot the data on the first y_train-axis
-    line1, = ax.plot(sr_list, MSE, label='MSE')
-    line2, = ax.plot(sr_list, MSE_d, label='MSE_deriv')
-    line3, = ax.plot(sr_list, MSE_dx, label='MSE_deriv_estima')
+    metric_list.append(metric_dict)
+    print()
 
-    # Create a twin y_train-axis
-    ax2 = ax.twinx()
+plt.figure()
+error = np.array([elem["r_mse"] for elem in metric_list]).reshape(-1)
+horiz = np.array([elem["f_h"] for elem in metric_list]).reshape(-1)
 
-    # Plot line4 on the second y_train-axis
-    line4, = ax2.plot(sr_list, FH, 'k--', label='forecasting_horizon')
+print(sr_list)
+print(error)
+print(horiz)
 
-    # Set the labels for the y_train-axes
-    ax.set_ylabel('MSE / MSE_deriv / MSE_deriv_estima')
-    ax2.set_ylabel('forecasting_horizon')
+plt.plot(sr_list, horiz)
+plt.ylabel("horizon")
+plt.xlabel("error")
+plt.show()
 
-    # Combine the legends for both y_train-axes
-    lines = [line1, line2, line3, line4]
-    labels = [line.get_label() for line in lines]
-    ax.legend(lines, labels)
-
-    plt.show()
-
+# See PyCharm help at https://www.jetbrains.com/help/pycharm/

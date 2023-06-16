@@ -16,28 +16,38 @@ import matplotlib.pyplot as plt
 
 
 class LinearReadout:
-    def __init__(self, n_dim=500, reg_param=1e-6):
+    def __init__(self, n_dim=500, reg_param=1e-6, use_tanh=False):
 
         self.reg_param = reg_param
         self.n_dim = n_dim
-
+        self.use_tanh = use_tanh
         self.W_out = None
 
-    def fit(self,  input, input_dot, states, states_dot, washout_steps):
+        if self.use_tanh == True:
+            print("USING TANH READOUT")
+
+    def fit(self, input, input_dot, states, states_dot, washout_steps):
         s = states[washout_steps:]
+        if self.use_tanh:
+            s = jnp.tanh(s)
         i = input[washout_steps:]
 
         W_out = (jnp.linalg.pinv(s.T @ s + self.reg_param * jnp.eye(self.n_dim))) @ s.T @ i
         self.W_out = W_out
         return W_out
 
-
     def predict(self, states):
-        return states @ self.W_out
-
+        if self.use_tanh:
+            return jnp.tanh(states) @ self.W_out
+        else:
+            return states @ self.W_out
 
     def deriv_predict(self, derivatives, states):
-        return derivatives @self.W_out
+        if self.use_tanh:
+            return ((1-jnp.tanh(states)) * derivatives)@self.W_out
+        else:
+            return derivatives @ self.W_out
+
 
 class LinearReadoutWithDerivatives:
     def __init__(self, n_dim=500, reg_param=1e-6, alpha=0):
@@ -59,10 +69,8 @@ class LinearReadoutWithDerivatives:
         self.W_out = W_out
         return W_out
 
-
     def predict(self, states):
         return states @ self.W_out
-
 
     def deriv_predict(self, derivatives, states):
         return derivatives @ self.W_out
@@ -77,12 +85,12 @@ class QuadraticReadout:
         self.W_l = None
         self.W_nl = None
 
-    def fit(self,  input, input_dot, states, states_dot,washout_steps):
+    def fit(self, input, input_dot, states, states_dot, washout_steps):
         s = jnp.hstack((states[washout_steps:], states[washout_steps:] ** 2))
 
         i = input[washout_steps:]
 
-        W_out = (jnp.linalg.pinv(s.T @ s + self.reg_param * jnp.eye(self.n_dim*2))) @ s.T @ i
+        W_out = (jnp.linalg.pinv(s.T @ s + self.reg_param * jnp.eye(self.n_dim * 2))) @ s.T @ i
         W_l = W_out[:self.n_dim]
         W_nl = W_out[self.n_dim:]
 
@@ -90,10 +98,8 @@ class QuadraticReadout:
         self.W_nl = W_nl
         return W_l, W_nl
 
-
     def predict(self, states):
         return states @ self.W_l + states ** 2 @ self.W_nl
-
 
     def deriv_predict(self, derivatives, states):
         return derivatives @ self.W_l + 2 * derivatives * states @ self.W_nl

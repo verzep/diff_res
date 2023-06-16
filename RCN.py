@@ -65,6 +65,37 @@ def _rdot(x: jnp.ndarray, r: jnp.ndarray, gamma: float, W_in: jnp.ndarray,
     r_dot = gamma * (-r + jnp.tanh(x @ W_in * sigma + r @ W + bias))
     return r_dot
 
+def _rdot_linear(x: jnp.ndarray, r: jnp.ndarray, gamma: float, W_in: jnp.ndarray,
+          sigma: float, W: jnp.ndarray, bias: jnp.ndarray) -> jnp.ndarray:
+    """
+    Compute the derivative of the reservoir state `r` with respect to time.
+
+    Parameters
+    ----------
+    x :  jnp.ndarray
+        The input signal.
+    r :  jnp.ndarray
+        The current reservoir state.
+    gamma : float
+        The leakage rate.
+    W_in :  jnp.ndarray
+        The input weights.
+    sigma :  jnp.ndarray
+        The scaling factor for the input signal.
+    W :  jnp.ndarray
+        The recurrent weights of the reservoir.
+    bias :  jnp.ndarray
+        The bias term.
+
+    Returns
+    -------
+     jnp.ndarray
+        The derivative of the reservoir state `r` with respect to time.
+    """
+    print("USING LINEAR STEP")
+    r_dot = gamma * (-r + x @ W_in * sigma + r @ W + bias)
+    return r_dot
+
 
 def _step(x: jnp.ndarray, r: jnp.ndarray, dt: float, gamma: float,
           W_in: jnp.ndarray, sigma: float, W: jnp.ndarray, bias: jnp.ndarray):
@@ -100,6 +131,41 @@ def _step(x: jnp.ndarray, r: jnp.ndarray, dt: float, gamma: float,
     return r, r_dot
 
 
+def _step_linear(x: jnp.ndarray, r: jnp.ndarray, dt: float, gamma: float,
+          W_in: jnp.ndarray, sigma: float, W: jnp.ndarray, bias: jnp.ndarray):
+    """
+    Perform a single step of the reservoir simulation.
+
+    Parameters
+    ----------
+    x : jnp.ndarray
+        The input signal.
+    r : jnp.ndarray
+        The current reservoir state.
+    dt : float
+        The simulation time step.
+    gamma : float
+        The leakage rate of the reservoir.
+    W_in : jnp.ndarray
+        The input weight matrix.
+    sigma : float
+        The scaling factor of the input.
+    W : jnp.ndarray
+        The reservoir weight matrix.
+    bias : jnp.ndarray
+        The bias vector.
+
+    Returns
+    -------
+    tuple[jnp.ndarray, jnp.ndarray]
+        A tuple containing the updated reservoir state and its time derivative.
+    """
+    r_dot = _rdot_linear(x, r, gamma, W_in, sigma, W, bias)
+    r = r + r_dot * dt
+    return r, r_dot
+
+
+
 class RCN:
 
     def __init__(self,
@@ -113,6 +179,7 @@ class RCN:
                  bias: float = 0.1,
                  dt: float = 1e-3,
                  washout_steps: int = None,
+                 linear_step = False
                  ):
 
 
@@ -165,10 +232,18 @@ class RCN:
         self.input_dot = None
 
 
-        self.rdot = jit(partial(_rdot, gamma=self.gamma, W_in=self.W_in,
+        if linear_step:
+            self.rdot = jit(partial(_rdot_linear, gamma=self.gamma, W_in=self.W_in,
+                                    sigma=self.sigma, W=self.W, bias=self.bias))
+
+            self.step = jit(partial(_step_linear, dt=self.dt, gamma=self.gamma, W_in=self.W_in,
+                                    sigma=self.sigma, W=self.W, bias=self.bias))
+        else:
+            self.rdot = jit(partial(_rdot, gamma=self.gamma, W_in=self.W_in,
                                 sigma=self.sigma, W=self.W, bias=self.bias))
 
-        self.step = jit(partial(_step, dt=self.dt, gamma=self.gamma, W_in=self.W_in,
+
+            self.step = jit(partial(_step, dt=self.dt, gamma=self.gamma, W_in=self.W_in,
                                 sigma=self.sigma, W=self.W, bias=self.bias))
 
     def listen(self, input, r_0=None):
@@ -205,7 +280,6 @@ class RCN:
         self.r_last = copy(r)
 
         return self.R
-
 
 
     def train(self, input, input_dot = None, states=None, states_dot = None):
